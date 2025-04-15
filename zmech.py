@@ -1,6 +1,7 @@
-import contextlib
 import io
 import random
+import re
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from attrs import define, field
@@ -289,6 +290,7 @@ class ZMech:
         self.globalmem = 0
         self.init_pc = 0
 
+        self.seps = None
         self.dict = None
         self.abbrevs = None
         self.globals = None
@@ -303,11 +305,11 @@ class ZMech:
     def load(self):
         self.himem = self.readW(0x04)
         self.init_pc = self.readW(0x06)
-        # self.load_dictionary()
         self.object_table = self.readW(0x0A)
         self.globalmem = self.readW(0x0C)
         self.staticmem = self.readW(0x0E)
 
+        self.load_dictionary()  # 0x08
         self.load_abbrevs()  # 0x18
         with self.seek(self.object_table):
             self.default_props = {}
@@ -336,7 +338,7 @@ class ZMech:
     def tell(self):
         return self.fp.tell()
 
-    @contextlib.contextmanager
+    @contextmanager
     def _returner(self, saved):
         yield
         self.seek(saved)
@@ -384,14 +386,14 @@ class ZMech:
         if isinstance(addr, (tuple, list)) and len(addr) == 2:
             addr = addr[0] + addr[1]
         b = val.to_bytes(1, byteorder='big', signed=(val < 0))
-        with self.seek(addr):
+        with self.seek(addr) if addr is not None else nullcontext():
             self.fp.write(b)
 
     def writeW(self, addr, val):
         if isinstance(addr, (tuple, list)) and len(addr) == 2:
             addr = addr[0] + 2 * addr[1]
         b = val.to_bytes(2, byteorder='big', signed=(val < 0))
-        with self.seek(addr):
+        with self.seek(addr) if addr is not None else nullcontext():
             self.fp.write(b)
 
     def _yieldW(self, max=None):
@@ -421,6 +423,23 @@ class ZMech:
     def obj(self, oidx):
         assert 0 < oidx < 256
         return Obj(self, oidx)
+
+    def load_dictionary(self):
+        self.seps = set()
+        self.dict = {}
+        dict_start = self.readW(0x08)
+        with self.seek(dict_start):
+            n = self.readB()
+            for _ in range(n):
+                zc = self.readB()
+                self.seps.add(chr(zc))
+            entry_length = self.readB()
+            num_entries = self.readW()
+            for _ in range(num_entries):
+                addr = self.tell()
+                w = self.readZ(max=2)
+                data = self.read(entry_length - 4)
+                self.dict[w] = addr
 
     def load_abbrevs(self):
         self.abbrevs = []
@@ -968,8 +987,36 @@ class ZMech:
                     o.parent = 0
                     o.sibling = 0
                 case "sread":
-                    s = input()
-                    raise NotImplementedError("actual parsing")
+                    bufp = args[0]
+                    parsep = args[1]
+
+                    maxchars = self.readB(bufp)
+                    s = input().lower().encode()[:maxchars] + b'\0'
+                    with self.seek(bufp + 1):
+                        self.fp.write(s)
+
+                    maxwords = self.readB(parsep)
+
+                    seps = ''.join(self.seps)
+                    seps = rf"([{seps}]|\s+)"
+                    words = s[:-1].decode()
+                    words = re.split(seps, words)
+                    with self.seek(parsep + 2):
+                        nwords = 0
+                        tidx = 1
+                        for word in words:
+                            if not word.strip():
+                                tidx += len(word)
+                                continue
+                            addr = self.dict.get(word, 0)
+                            self.writeW(None, addr)
+                            self.writeB(None, len(word))
+                            self.writeB(None, tidx)
+                            tidx += len(word)
+                            nwords += 1
+                            if nwords == maxwords:
+                                break
+                    self.writeB(parsep + 1, nwords)
                 case _:
                     raise RuntimeError(f"unknown instr")
         except Exception as e:
