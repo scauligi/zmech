@@ -5,6 +5,13 @@ from pathlib import Path
 
 from attrs import define, field
 
+_DEBUG = True
+
+
+def printd(*args, **kwargs):
+    if _DEBUG:
+        print(*args, **kwargs)
+
 
 @define
 class Imm:
@@ -97,13 +104,92 @@ class Prop:
 
 @define
 class Obj:
+    _z: "ZMech"
     idx: int
-    shortname: str
-    parent: int
-    sibling: int
-    child: int
-    attrs: set = field(factory=set)
-    props: dict[int, Prop] = field(factory=dict)
+
+    @property
+    def _addr(self):
+        return self._z.object_table + 31 * 2 + 9 * (self.idx - 1)
+
+    @property
+    def _attrs(self):
+        return int.from_bytes(self._z.read(4, self._addr), 'big')
+
+    @property
+    def attrs(self):
+        aa = self._attrs
+        attrs = set()
+        for n in range(8 * 4):
+            if aa & (0x80000000 >> n):
+                attrs.add(n)
+        return frozenset(attrs)
+
+    def test_attr(self, a):
+        aa = self._attrs
+        bit = 0x80000000 >> a
+        return bool(aa & bit)
+
+    def set_attr(self, a):
+        aa = self._attrs
+        bit = 0x80000000 >> a
+        aa |= bit
+        with self._z.seek(self._addr):
+            self._z.fp.write(int.to_bytes(aa, 4, 'big'))
+
+    def clear_attr(self, a):
+        aa = self._attrs
+        bit = 0x80000000 >> a
+        aa = (aa | bit) ^ bit
+        with self._z.seek(self._addr):
+            self._z.fp.write(int.to_bytes(aa, 4, 'big'))
+
+    @property
+    def parent(self):
+        return self._z.readB(self._addr + 4)
+
+    @parent.setter
+    def parent(self, val):
+        self._z.writeB(self._addr + 4, val)
+
+    @property
+    def sibling(self):
+        return self._z.readB(self._addr + 4 + 1)
+
+    @sibling.setter
+    def sibling(self, val):
+        self._z.writeB(self._addr + 4 + 1, val)
+
+    @property
+    def child(self):
+        return self._z.readB(self._addr + 4 + 2)
+
+    @child.setter
+    def child(self, val):
+        self._z.writeB(self._addr + 4 + 2, val)
+
+    @property
+    def _plist(self):
+        return self._z.readW(self._addr + 4 + 3)
+
+    @property
+    def shortname(self):
+        with self._z.seek(self._plist):
+            n = self._z.readB()
+            return self._z.readZ(max=n)
+
+    @property
+    def props(self):
+        plist = self._plist
+        n = self._z.readB(plist)
+        cur = plist + 1 + 2 * n
+        while True:
+            szbyte = self._z.readB(cur)
+            if not szbyte:
+                break
+            propnum = szbyte & 0x1F
+            nbytes = (szbyte >> 5) + 1
+            yield Prop(propnum, nbytes, cur + 1, self._z.read(nbytes, cur + 1))
+            cur += 1 + nbytes
 
 
 def _s(n):
@@ -206,9 +292,9 @@ class ZMech:
         self.dict = None
         self.abbrevs = None
         self.globals = None
+        self.object_table = None
 
         self.default_props = None
-        self.objects = None
 
         self.frames = []
         self.stack = []
@@ -218,11 +304,15 @@ class ZMech:
         self.himem = self.readW(0x04)
         self.init_pc = self.readW(0x06)
         # self.load_dictionary()
+        self.object_table = self.readW(0x0A)
         self.globalmem = self.readW(0x0C)
         self.staticmem = self.readW(0x0E)
 
         self.load_abbrevs()  # 0x18
-        self.load_objects()  # 0x0a, but do this after abbrevs
+        with self.seek(self.object_table):
+            self.default_props = {}
+            for n in range(1, 32):
+                self.default_props[n] = self.readW()
 
         self.frames = []
         self.stack = [0]
@@ -328,44 +418,9 @@ class ZMech:
         assert 16 <= vidx < 256
         return self.readW(self.globalmem + 2 * (vidx - 16))
 
-    def load_objects(self):
-        object_table = self.readW(0x0A)
-        with self.seek(object_table):
-            self.default_props = {}
-            for n in range(1, 32):
-                self.default_props[n] = self.readW()
-            self.objects = {}
-            first_proplistp = 0
-            for idx in range(1, 256):
-                if first_proplistp and self.tell() >= first_proplistp:
-                    break
-                attr_int = int.from_bytes(self.read(4), 'big')
-                attrs = set()
-                for n in range(8 * 4):
-                    if attr_int & (0x80000000 >> n):
-                        attrs.add(n)
-                parent = self.readB()
-                sibling = self.readB()
-                child = self.readB()
-                proplistp = self.readW()
-                if not first_proplistp:
-                    first_proplistp = proplistp
-                with self.seek(proplistp):
-                    textlength = self.readB()
-                    shortname = self.readZ(max=textlength)
-                    props = {}
-                    while True:
-                        szbyte = self.readB()
-                        if not szbyte:
-                            break
-                        propnum = szbyte & 0b11111
-                        nbytes = (szbyte >> 5) + 1
-                        prop = Prop(propnum, nbytes, self.tell())
-                        prop.data = self.read(nbytes)
-                        props[propnum] = prop
-                self.objects[idx] = Obj(
-                    idx, shortname, parent, sibling, child, attrs, props
-                )
+    def obj(self, oidx):
+        assert 0 < oidx < 256
+        return Obj(self, oidx)
 
     def load_abbrevs(self):
         self.abbrevs = []
@@ -625,9 +680,12 @@ class ZMech:
                 return self.gvar(idx)
 
     def set(self, vidx, val, _indirect=False):
+        # if val != _u(val):
+        #     print(hex(self.tell()), f"SET  {vidx}  {val=}  {_u(val)=}")
         if isinstance(vidx, Var):
             vidx = vidx.idx
         val = _u(val)
+        printd(f"  $v{vidx} <- {hex(val)}")
         if vidx == 0:
             if _indirect:
                 self.stack[-1] = val
@@ -645,6 +703,7 @@ class ZMech:
 
     def _br(self, insn, br_dir):
         if bool(br_dir) == bool(insn.br_dir):
+            printd(f"  (taken: {insn.br_dir} == {br_dir})")
             if insn.br_ret is not None:
                 self._ret(int(insn.br_ret))
             elif insn.dst is not None:
@@ -653,16 +712,23 @@ class ZMech:
                 raise RuntimeError(
                     f"unknown dst/ret for instr {insn.name!r} at 0x{insn.addr:04x}"
                 )
+        else:
+            printd(f"  (fallthru: {insn.br_dir} != {br_dir})")
 
     def step(self):
         try:
-            # if self.frames:
-            #     print(hex(self.tell()), self.frames[-1].locals, self.stack[-1])
-            # else:
-            #     print(hex(self.tell()), self.stack[-1])
             insn = self.readInsn()
             assert insn, "insn is None???"
             args = [self.eval(arg) for arg in insn.args]
+            if None not in args:
+                printd(
+                    f"{insn.addr:04x} : {insn.name}  {' '.join(map(hex, args))}", end=''
+                )
+                if insn.out:
+                    printd(f"  -> {insn.out}", end='')
+                if insn.br_dir is not None:
+                    printd(f"  br if {insn.br_dir}", end='')
+                printd()
             match insn.name:
                 case "quit":
                     self.ended = True
@@ -778,121 +844,122 @@ class ZMech:
                 case "print_paddr":
                     print(self.readZ(args[0] * 2), end='')
                 case "print_obj":
-                    o = self.objects[args[0]]
+                    o = self.obj(args[0])
                     print(o.shortname, end='')
                 case "new_line":
                     print()
                 case "test_attr":
-                    o = self.objects[args[0]]
-                    self._br(insn, args[1] in o.attrs)
+                    o = self.obj(args[0])
+                    self._br(insn, o.test_attr(args[1]))
                 case "set_attr":
-                    o = self.objects[args[0]]
-                    o.attrs.add(args[1])
+                    o = self.obj(args[0])
+                    o.set_attr(args[1])
                 case "clear_attr":
-                    o = self.objects[args[0]]
-                    o.attrs.discard(args[1])
+                    o = self.obj(args[0])
+                    o.clear_attr(args[1])
                 case "get_prop":
-                    o = self.objects[args[0]]
+                    o = self.obj(args[0])
                     n = args[1]
-                    if n in o.props:
-                        assert o.props[args[1]].len <= 2
-                        val = int.from_bytes(o.props[n].data)
+                    for prop in o.props:
+                        if prop.num == n:
+                            assert prop.len <= 2
+                            val = int.from_bytes(prop.data)
+                            break
                     else:
                         val = self.default_props[n]
                     self.set(insn.out, val)
                 case "get_prop_addr":
-                    o = self.objects[args[0]]
+                    o = self.obj(args[0])
                     n = args[1]
-                    if n not in o.props:
-                        self.set(insn.out, 0)
+                    for prop in o.props:
+                        if prop.num == n:
+                            self.set(insn.out, prop.addr)
+                            break
                     else:
-                        self.set(insn.out, o.props[n].addr)
+                        self.set(insn.out, 0)
                 case "get_prop_len":
                     if args[0] == 0:
                         self.set(insn.out, 0)
                     else:
                         szbyte = self.readB(args[0] - 1)
-                        if not szbyte:
-                            nbytes = 0
-                        else:
-                            nbytes = (szbyte >> 5) + 1
+                        assert szbyte
+                        nbytes = (szbyte >> 5) + 1
                         self.set(insn.out, nbytes)
                 case "get_next_prop":
-                    o = self.objects[args[0]]
+                    o = self.obj(args[0])
                     n = args[1]
                     res = 0
                     if n == 0:
-                        res = list(o.props.keys())[0]
+                        res = next(o.props).num
                     else:
-                        for p in o.props.keys():
-                            if p < n:
-                                res = p
+                        for p in o.props:
+                            if p.num < n:
+                                res = p.num
                                 break
                     self.set(insn.out, res)
                 case "put_prop":
-                    o = self.objects[args[0]]
+                    o = self.obj(args[0])
                     n = args[1]
-                    if n not in o.props:
+                    for p in o.props:
+                        if p.num == n:
+                            if p.len == 1:
+                                self.writeB(p.addr, args[2] & 0xFF)
+                            elif p.len == 2:
+                                self.writeW(p.addr, args[2])
+                            else:
+                                raise Exception(
+                                    f"prop {hex(n)} for obj {hex(args[0])} has bad length"
+                                )
+                            break
+                    else:
                         raise RuntimeError(
                             f"prop {hex(n)} does not exist for obj {hex(args[0])}"
                         )
-                    b = args[2].to_bytes(2, 'big', signed=args[2] < 0)
-                    p = o.props[n]
-                    if p.len == 1:
-                        self.writeB(p.addr, args[2] & 0xFF)
-                        p.data = b[-1]
-                    elif p.len == 2:
-                        self.writeW(p.addr, args[2])
-                        p.data = b
-                    else:
-                        raise Exception(
-                            f"prop {hex(n)} for obj {hex(args[0])} has bad length"
-                        )
                 case "get_parent":
-                    o = self.objects[args[0]]
+                    o = self.obj(args[0])
                     self.set(insn.out, o.parent)
                 case "jin":
-                    o = self.objects[args[0]]
-                    p = self.objects[args[1]]
+                    o = self.obj(args[0])
+                    p = self.obj(args[1])
                     self._br(insn, o.parent == p.idx)
                 case "get_child":
-                    o = self.objects[args[0]]
+                    o = self.obj(args[0])
                     self.set(insn.out, o.child)
                     self._br(insn, o.child)
                 case "get_sibling":
-                    o = self.objects[args[0]]
+                    o = self.obj(args[0])
                     self.set(insn.out, o.sibling)
                     self._br(insn, o.sibling)
                 case "insert_obj":
-                    o = self.objects[args[0]]
-                    d = self.objects[args[1]]
+                    o = self.obj(args[0])
+                    d = self.obj(args[1])
                     if o.parent:
-                        p = self.objects[o.parent]
+                        p = self.obj(o.parent)
                         if p.child == o.idx:
                             p.child = o.sibling
                         else:
-                            s = self.objects[p.child]
+                            s = self.obj(p.child)
                             while s.sibling:
                                 if s.sibling == o.idx:
                                     s.sibling = o.sibling
                                     break
-                                s = self.objects[s.sibling]
+                                s = self.obj(s.sibling)
                     o.parent = d.idx
                     o.sibling = d.child
                     d.child = o.idx
                 case "remove_obj":
-                    o = self.objects[args[0]]
+                    o = self.obj(args[0])
                     if o.parent:
-                        p = self.objects[o.parent]
+                        p = self.obj(o.parent)
                         if p.child == o.idx:
                             p.child = o.sibling
                         else:
-                            s = self.objects[p.child]
+                            s = self.obj(p.child)
                             while s.sibling:
                                 if s.sibling == o.idx:
                                     s.sibling = o.sibling
                                     break
-                                s = self.objects[s.sibling]
+                                s = self.obj(s.sibling)
                     o.parent = 0
                     o.sibling = 0
                 case "sread":
