@@ -5,7 +5,7 @@ from pathlib import Path
 
 from attrs import define, field
 
-_DEBUG = True
+_DEBUG = False
 
 
 def printd(*args, **kwargs):
@@ -783,13 +783,18 @@ class ZMech:
                 case "call":
                     ret = self.tell()
                     dst = 2 * args[0]
-                    self.seek(dst)
-                    nlocals = self.readB()
-                    lvars = [self.readW() for _ in range(nlocals)]
-                    args = args[1:]  # since the first arg is the call target
-                    assert len(args) <= len(lvars), f"{len(insn.args)=} {len(lvars)=}"
-                    lvars[: len(args)] = args
-                    self.frames.append(Frame(ret, lvars, insn.out))
+                    if dst == 0:
+                        self.set(insn.out, 0)
+                    else:
+                        self.seek(dst)
+                        nlocals = self.readB()
+                        lvars = [self.readW() for _ in range(nlocals)]
+                        args = args[1:]  # since the first arg is the call target
+                        assert len(args) <= len(
+                            lvars
+                        ), f"{len(insn.args)=} {len(lvars)=}"
+                        lvars[: len(args)] = args
+                        self.frames.append(Frame(ret, lvars, insn.out))
                 case "ret":
                     self._ret(args[0])
                 case "rtrue":
