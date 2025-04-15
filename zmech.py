@@ -656,7 +656,12 @@ class ZMech:
 
     def step(self):
         try:
+            # if self.frames:
+            #     print(hex(self.tell()), self.frames[-1].locals, self.stack[-1])
+            # else:
+            #     print(hex(self.tell()), self.stack[-1])
             insn = self.readInsn()
+            assert insn, "insn is None???"
             args = [self.eval(arg) for arg in insn.args]
             match insn.name:
                 case "quit":
@@ -726,7 +731,7 @@ class ZMech:
                 case "rfalse":
                     self._ret(0)
                 case "ret_popped":
-                    self._ret(self.stack[-1])
+                    self._ret(self.stack.pop())
                 case "load":
                     self.set(insn.out, self.eval(Var(args[0]), _indirect=True))
                 case "store":
