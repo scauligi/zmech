@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 
 import itertools
-from pathlib import Path
+from collections import defaultdict as ddict
 
 from attrs import define, field
 
-from dump_code import Var, parse_routine
+from dump_code import BB_END
 from zmech import ZMech
+from zmech.structs import Imm, Var
 
 ATTRIBUTES = {
     0x03: "LONG_DESC_SEEN",
+    0x06: "ROOM?",
     0x0B: "OPEN",  # (as in (eb)[kitchen window] or bottle)
     0x1B: "BOAT",
 }
 
 # Props:
 # 0x5: list-of-oidxs of interactables (eg stairs, chimney, window)
+# 0xb: first-encounter text?
 # 0xc: point score value? for taking? see @a3f0 in [a3e0]
 # 0xd: point score value? eg for finding (a3)[large emerald]
 # 0xe: paddr of out-in-world description for nouns
 # 0x11 arg:
 #   0x3: print long/first-visit description
 #   0x4: print short/repeat-visit description (probably)
+#   0x6: perform "take" failure?
+# DIRECTIONS: len 1 => obj, len 2 => string to print instead
+#   see [8aa4], seems to be the "go in X direction" routine
 # 0x16: down
 # 0x17: up
 # 0x18: southwest
@@ -36,6 +42,8 @@ ATTRIBUTES = {
 Var.map = {
     16: "loc",
     17: "score",
+    18: "turns",
+    33: "openedCanary",
     79: "also_maybe_score",
     82: "isLight",
     114: "verb_parse_info?",
@@ -47,6 +55,7 @@ Var.map = {
     135: "object",
     136: "verb",
     156: "foundSecretPath",
+    172: "verbCodeDispatchTable",
     173: "verbTable?",
 }
 
@@ -99,12 +108,64 @@ Var.map = {
 
 @define
 class Routine:
-    header: int
-    addr: int
-    locals: list[int]
-    insns: list
-    bbs: set
+    header: int | None
+    locals: list[int] = field(factory=list)
+    insns: list = field(factory=list)
+    bbs: set = field(factory=set)
+    calls: list['Insn'] = field(factory=list)
     notes: list[str] = field(factory=list)
+
+
+def parse_routine(z, addr, is_start=False):
+    r = Routine(addr if not is_start else None)
+    with z.seek(addr):
+        if not is_start:
+            nargs = z.readB()
+            r.locals.extend(z.readW() for _ in range(nargs))
+        seen = set()
+        while True:
+            insn = z.readInsn()
+            if not insn:
+                break
+            r.insns.append(insn)
+            seen.add(insn.addr)
+            if insn.name == "call" and insn.dst:
+                r.calls.append(insn)
+            elif insn.dst is not None:
+                r.bbs.add(insn.dst)
+            if insn.name in BB_END:
+                if seen.issuperset(r.bbs):
+                    break
+    return r
+
+
+def slurp_verbs(z):
+    verbs = []
+    dict_start = z.readW(0x08)
+    with z.seek(dict_start):
+        n = z.readB()
+        z.skip(n)
+        l = z.readB()
+        num = z.readW()
+        for _ in range(num):
+            w = z.readZ(max=2)
+            d = z.read(l - 4)
+            if d[0] & 0x40:
+                wty = d[0]
+                if wty & 0x3 == 0x1:
+                    it = d[1]
+                else:
+                    it = d[2]
+                it = 0xFF - it
+                it = z.readW(z.gvar(173) + 2 * it)
+                it = it + 1
+                v = z.readB(it + 0x7)
+                verbs.append((w, d, v))
+    verbs.sort(key=lambda wdv: wdv[2])
+    verbs_by_code = {}
+    for v, wdv in itertools.groupby(verbs, key=lambda wdv: wdv[2]):
+        verbs_by_code[v] = [w for w, d, v in wdv]
+    return verbs_by_code
 
 
 def main(fname):
@@ -112,89 +173,98 @@ def main(fname):
     z.load()
 
     routines = {}
-    remaining = set()
+
+    max_oidx = (z.obj(1)._plist - z.obj(1)._addr) // (z.obj(2)._addr - z.obj(1)._addr)
+
+    notes_to_add = ddict(list)
+
+    gvar_setters = ddict(list)
 
     # slurp call targets from props 0x2, 0x9, and 0x11
-    for obj in z.objects.values():
-        for prop in [0x2, 0x9, 0x11]:
-            if prop in obj.props:
-                assert len(obj.props[prop]) == 2
-                dst = int.from_bytes(obj.props[prop], 'big') * 2
-                if dst:
-                    remaining.add(dst)
+    for oidx in range(1, max_oidx + 1):
+        obj = z.obj(oidx)
+        for prop in obj.props():
+            if prop.num in [0x2, 0x9, 0x11]:
+                if dst := prop.paddr:
+                    notes_to_add[dst].append(
+                        f"({obj.idx:02x})[{obj.shortname}] prop {hex(prop.num)}"
+                    )
 
-    # there's also a call site based off of loadw $v171 0x89
-    # NOTE: there's another one based off of $v172 but I haven't figured it out yet
-    dst = z.readW(z.gvar(171) + 0x89 * 2) * 2
-    remaining.add(dst)
+    # there's also a call site based off of loadw $v171 0x89 [5869]
+    dst = z.readW((z.gvar(171), 0x89)) * 2
+    notes_to_add[dst].append("from [5869]: loadw $v171 0x89 -> call")
 
-    insns, rstarts, jumps = parse_routine(z, z.init_pc)
-    r = Routine(None, z.init_pc, None, insns, jumps)
-    routines[z.init_pc] = r
-    remaining.update(rstarts)
+    for verbCode in range(0, 0x91 + 1):
+        dst = z.readW((z.gvar(172), verbCode)) * 2
+        if dst:
+            notes_to_add[dst].append(
+                f"from [5817]: loadw $v172 [verbCode: {verbCode:02x}] -> call"
+            )
 
-    while remaining:
-        rstart = remaining.pop()
-        z.seek(rstart)
-        args = []
-        nargs = z.readB()
-        for _ in range(nargs):
-            args.append(z.readW())
-        addr = z.tell()
-        insns, rstarts, jumps = parse_routine(z, addr)
-        r = Routine(rstart, addr, args, insns, jumps)
-        routines[rstart] = r
-        remaining.update(rstarts.difference(routines))
+    z.seek(z.himem)
+    if z.tell() % 2 == 1:
+        z.skip(1)
+    while z.tell() < 0x10B16:
+        if z.tell() in (0x6E4C,):
+            a = z.tell()
+            routines[a] = z.readZ()
+            continue
+        r = parse_routine(z, z.tell())
+        routines[r.header] = r
+        for call in r.calls:
+            callhdr = call.args[0].value * 2
+            notes_to_add[callhdr].append(f"called by [{r.header:04x}]: {call}")
+        z.seek(r.insns[-1].end)
+        if z.tell() % 2 == 1:
+            z.skip(1)
+    try:
+        while True:
+            a = z.tell()
+            routines[a] = z.readZ()
+    except EOFError:
+        pass
 
-    verbs = []
-    dict_start = z.readW(0x08)
-    z.seek(dict_start)
-    n = z.readB()
-    z.skip(n)
-    l = z.readB()
-    num = z.readW()
-    for _ in range(num):
-        w = z.readZ(max=2)
-        d = z.read(l - 4)
-        if d[0] & 0x40:
-            wty = d[0]
-            if wty & 0x3 == 0x1:
-                it = d[1]
-            else:
-                it = d[2]
-            it = 0xFF - it
-            it = z.readW(z.gvar(173) + 2 * it)
-            it = it + 1
-            v = z.readB(it + 0x7)
-            verbs.append((w, d, v))
-    verbs.sort(key=lambda wdv: wdv[2])
-    print('verb codes:')
-    for v, wdv in itertools.groupby(verbs, key=lambda wdv: wdv[2]):
-        print(f"[{v:02x}] {' '.join(w for w,d,_v in wdv)}")
+    for dst, notes in notes_to_add.items():
+        if dst in routines:
+            routines[dst].notes.extend(notes)
+        else:
+            print(f"not found: [{dst:04x}]")
 
-    print()
-    print()
-    print()
-    for obj in z.objects.values():
-        for prop in [0x2, 0x9, 0x11]:
-            if prop in obj.props:
-                dst = int.from_bytes(obj.props[prop], 'big') * 2
-                if dst:
-                    r = routines[dst]
-                    r.notes.append(f"({obj.idx:02x})[{obj.shortname}] prop {hex(prop)}")
+    for _, r in sorted(routines.items()):
+        if not isinstance(r, Routine):
+            continue
+        for insn in r.insns:
+            v = None
+            if insn.out:
+                v = insn.out.idx
+            elif insn.name in ("store", "inc", "dec", "inc_chk", "dec_chk"):
+                if isinstance(insn.args[0], Imm):
+                    v = insn.args[0].value
+            if v and 16 <= v < 256:
+                gvar_setters[v].append(insn)
 
-    for vidx in sorted(Var.seen.difference(range(16))):
-        if not z.gvar(vidx) and vidx not in Var.map:
+    for vidx in range(16, 256):
+        if not z.gvar(vidx) and vidx not in Var.map and vidx not in gvar_setters:
             continue
         v = Var(vidx)
-        print(f"{v}: {z.gvar(vidx):04x}")
-    print(f"\nalso I found {len(routines)} routines")
+        print(f"{v}: {z.gvar(vidx):04x}", end='')
+        if vidx in gvar_setters:
+            setters = ' '.join(f"[{insn.addr:04x}]" for insn in gvar_setters[vidx])
+            print(f"  ; {setters}", end='')
+        print()
+    print(
+        f"\nalso I found {len([r for r in routines.values() if isinstance(r, Routine)])} routines"
+    )
+    print()
+    print()
+    print()
 
     for rstart in sorted(routines):
         r = routines[rstart]
-        print()
-        print()
-        print()
+        if not isinstance(r, Routine):
+            r = r.replace('"', '\\"')
+            print(f'{rstart:04x} : "{r}"')
+            continue
         for note in r.notes:
             print(f";; {note}")
         if r.header is not None:
@@ -203,16 +273,27 @@ def main(fname):
             if insn.addr in r.bbs and insn is not r.insns[0]:
                 print()
             print(insn)
+        print()
+        print()
+        print()
+
+    print()
+    print()
+    print()
+    verbs = slurp_verbs(z)
+    print('verb codes:')
+    for v, ww in verbs.items():
+        print(f"[{v:02x}] {' '.join(ww)}")
 
 
 def splat(z, oidx):
-    o = z.objects[oidx]
-    for p, v in o.props.items():
-        if len(v) == 1:
-            ooidx = int.from_bytes(v)
-            if ooidx in z.objects:
-                oo = z.objects[ooidx]
-                print(hex(p), f"{ooidx:02x}", oo.shortname)
+    o = z.obj(oidx)
+    for p in o.props():
+        if p.len == 1:
+            ooidx = int.from_bytes(p.data)
+            if 1 <= ooidx <= 255:
+                oo = z.obj(ooidx)
+                print(hex(p.num), f"{ooidx:02x}", oo.shortname)
 
 
 if __name__ == '__main__':
@@ -222,5 +303,6 @@ if __name__ == '__main__':
     if sys.flags.interactive:
         z = ZMech(fname)
         z.load()
+        verbs = slurp_verbs(z)
     else:
         main(fname)

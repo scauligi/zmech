@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 
 import sys
-from pathlib import Path
 
-from attrs import define, field
-
-from zmech import Imm, Insn, Str, Var, ZMech, zdecode
+from zmech import ZMech
 
 BB_END = "ret jump rtrue rfalse print_ret restore restart ret_popped quit".split()
 
