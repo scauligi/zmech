@@ -16,20 +16,25 @@ ATTRIBUTES = {
 }
 
 # Props:
+# 0x2: TODO unknown callable paddr
 # 0x4: list-of-[noun-addr, call-paddr] for I guess interactables that aren't oidxs
 # 0x5: list-of-oidxs of interactables (eg stairs, chimney, window)
+# 0x9: TODO unknown callable paddr
 # 0xb: first-encounter text?
 # 0xc: point score value? for taking? see @a3f0 in [a3e0]
 # 0xd: point score value? eg for finding (a3)[large emerald]
 # 0xe: paddr of out-in-world description for nouns
 # 0x10: list-of-adj-codes to I guess disambiguate this noun
-# 0x11 arg:
+# 0x11 callable paddr (interact specialization?):
 #   0x3: print long/first-visit description
 #   0x4: print short/repeat-visit description (probably)
 #   0x6: perform "take" failure?
 # 0x12: list-of-words, each word is a direct (z)addr to a synonym noun in the dictionary
 # DIRECTIONS: len 1 => obj, len 2 => string to print instead
 #   see [8aa4], seems to be the "go in X direction" routine
+# 0x13: land via boat (room oidx)
+# 0x14: exit (also has [loc, exit-via] oidx pairs)
+# 0x15: enter (also has [loc, enter-via] oidx pairs)
 # 0x16: down
 # 0x17: up
 # 0x18: southwest
@@ -67,52 +72,6 @@ Var.map = {
     173: "verbTable?",
 }
 
-# parse buffer:
-#   b[maxw] b[nwords] blocks...
-#   where block is w[&dictword|null] [wlen] [textidx]
-
-# burn: 41 93 00
-# eat:  41 a3 00
-# find: 41 ac 00
-# kiss: 41 ba 00
-# look: 41 c2 00
-# talk: 41 de 00
-
-# ...
-# [5a18]: bb where verb data is set
-# $v116[0] <w- third byte of word data?
-# $v116[2] <w- $v114 (another struct?)
-# $v114[0] <w- $dict-addr-of-the-verb
-# $v114[2] <b- wlen of the verb
-# $v114[3] <b- textidx of the verb
-
-# [5baa]: $pword $flag $???
-#   tests first byte of $pword data for $flag
-#   eg verb flag seems to be 0x40
-
-# [644a]: $v1[0x7] -> $verb
-#   also $v1 -> $v131
-
-# so $v116[0], do 0xff - that, then loadW $v173[that] -> add 1 -> load that[0x7] -> sets $verb
-
-# verb codes:
-#   0x1a: clean? scrub?
-#   0x1c: burn / set fire to
-#   0x22: enter?
-#   0x25: count?
-#   0x2a:
-#   0x2b: enter?
-#   0x2d:
-#   0x33: eat
-#   0x38: look? or just initial description or something
-#   0x3c: find or "where is"?
-#   0x3f:
-#   0x53:
-#   0x56:
-#   0x5d: love? kiss?
-#   0x6f: talk (to)?
-#   0x8b: boat-related?
-
 
 def slurp_verbs(z):
     verbs = []
@@ -140,7 +99,13 @@ def slurp_verbs(z):
     verbs_by_code = {}
     for v, wdv in itertools.groupby(verbs, key=lambda wdv: wdv[2]):
         verbs_by_code[v] = [w for w, d, v in wdv]
-    swaps = [(0x22, "enter"), (0x2B, "open"), (0x40, "give"), (0x7D, "swim")]
+    swaps = [
+        (0x22, "enter"),
+        (0x2B, "open"),
+        (0x40, "give"),
+        (0x6D, "ring"),
+        (0x7D, "swim"),
+    ]
     for code, verb in swaps:
         ww = verbs_by_code[code]
         idx = ww.index(verb)
@@ -173,8 +138,9 @@ def main(fname):
 
     gvar_setters = ddict(list)
 
+    notes_to_add[z.init_pc - 1].append('<start>')
+
     # slurp call targets from props 0x2, 0x9, and 0x11
-    # TODO also prop 0x5: array of ???
     for oidx in range(1, max_oidx + 1):
         obj = z.obj(oidx)
         for prop in obj.props():
