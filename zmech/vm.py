@@ -229,9 +229,11 @@ def doInsn(z, insn):
             o = z.obj(args[0])
             z.set(insn.out, o._parent)
         case "jin":
-            o = z.obj(args[0])
-            p = z.obj(args[1])
-            _br(z, insn, o._parent == p.idx)
+            if not args[0]:
+                _br(z, insn, False)
+            else:
+                o = z.obj(args[0])
+                _br(z, insn, o._parent == args[1])
         case "get_child":
             o = z.obj(args[0])
             z.set(insn.out, o._child)
