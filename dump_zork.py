@@ -6,8 +6,8 @@ from collections import defaultdict as ddict
 
 from attrs import define, field
 
-from dump_code import BB_END
 from zmech import ZMech
+from zmech.disasm import Routine, parse_routine
 from zmech.structs import Imm, Var
 
 ATTRIBUTES = {
@@ -18,15 +18,18 @@ ATTRIBUTES = {
 }
 
 # Props:
+# 0x4: list-of-[noun-addr, call-paddr] for I guess interactables that aren't oidxs
 # 0x5: list-of-oidxs of interactables (eg stairs, chimney, window)
 # 0xb: first-encounter text?
 # 0xc: point score value? for taking? see @a3f0 in [a3e0]
 # 0xd: point score value? eg for finding (a3)[large emerald]
 # 0xe: paddr of out-in-world description for nouns
+# 0x10: list-of-adj-codes to I guess disambiguate this noun
 # 0x11 arg:
 #   0x3: print long/first-visit description
 #   0x4: print short/repeat-visit description (probably)
 #   0x6: perform "take" failure?
+# 0x12: list-of-words, each word is a direct (z)addr to a synonym noun in the dictionary
 # DIRECTIONS: len 1 => obj, len 2 => string to print instead
 #   see [8aa4], seems to be the "go in X direction" routine
 # 0x16: down
@@ -113,40 +116,6 @@ Var.map = {
 #   0x8b: boat-related?
 
 
-@define
-class Routine:
-    header: int | None
-    locals: list[int] = field(factory=list)
-    args: int | None = None
-    insns: list = field(factory=list)
-    bbs: set = field(factory=set)
-    calls: list['Insn'] = field(factory=list)
-    notes: list[str] = field(factory=list)
-
-
-def parse_routine(z, addr, is_start=False):
-    r = Routine(addr if not is_start else None)
-    with z.seek(addr):
-        if not is_start:
-            nargs = z.readB()
-            r.locals.extend(z.readW() for _ in range(nargs))
-        seen = set()
-        while True:
-            insn = z.readInsn()
-            if not insn:
-                break
-            r.insns.append(insn)
-            seen.add(insn.addr)
-            if insn.name == "call" and insn.dst:
-                r.calls.append(insn)
-            elif insn.dst is not None:
-                r.bbs.add(insn.dst)
-            if insn.name in BB_END:
-                if seen.issuperset(r.bbs) and z.tell() not in (0x6E4B, 0x8497):
-                    break
-    return r
-
-
 def slurp_verbs(z):
     verbs = []
     dict_start = z.readW(0x08)
@@ -183,7 +152,7 @@ def slurp_verbs(z):
 
 
 def print_insn(insn, verbs_by_code):
-    if insn.name == "je" and str(insn.args[0]) == '$verb':
+    if insn.name == "je" and str(insn.args[0]) == '$verb_v136':
         insn = copy.copy(insn)
         for i in range(1, len(insn.args)):
             a = insn.args[i]
@@ -207,6 +176,7 @@ def main(fname):
     gvar_setters = ddict(list)
 
     # slurp call targets from props 0x2, 0x9, and 0x11
+    # TODO also prop 0x5: array of ???
     for oidx in range(1, max_oidx + 1):
         obj = z.obj(oidx)
         for prop in obj.props():
@@ -217,6 +187,12 @@ def main(fname):
                     )
                     if prop.num == 0x11:
                         call_args[dst] = 1
+            if prop.num in [0x4]:
+                words = prop.words
+                for i in range(0, len(words), 2):
+                    item = z.readZ(words[i])
+                    dst = words[i + 1] * 2
+                    notes_to_add[dst].append(f"{obj} prop {hex(prop.num)} : {item}")
 
     verbs = slurp_verbs(z)
 
@@ -242,7 +218,9 @@ def main(fname):
     if z.tell() % 2 == 1:
         z.skip(1)
     while z.tell() < 0x10B16:
-        r = parse_routine(z, z.tell())
+        r = parse_routine(z)
+        if z.tell() in (0x6E4B, 0x8497):
+            parse_routine(z, r=r)
         routines[r.header] = r
         for call in r.calls:
             callhdr = call.args[0].value * 2
@@ -260,16 +238,19 @@ def main(fname):
 
     notes_to_add[0x54C4].append("turn_ticker")
 
+    # check that we have routines for all expected sites
     for dst, notes in notes_to_add.items():
         if dst in routines:
             routines[dst].notes.extend(notes)
         else:
             print(f"not found: [{dst:04x}]")
 
+    # backfill callee nargs based on callers
     for dst, nargs in call_args.items():
         r = routines[dst]
         r.args = min(nargs, len(r.locals))
 
+    # find all insns that write to global vars
     for _, r in sorted(routines.items()):
         if not isinstance(r, Routine):
             continue
@@ -283,6 +264,15 @@ def main(fname):
             if v and 16 <= v < 256:
                 gvar_setters[v].append(insn)
 
+    # are there any routines we don't know from whence they came?
+    for dst, r in routines.items():
+        if isinstance(r, Routine):
+            if not r.notes:
+                print(f"[{dst:04x}] has no notes")
+
+    print()
+    print()
+    print()
     for vidx in range(16, 256):
         if not z.gvar(vidx) and vidx not in Var.map and vidx not in gvar_setters:
             continue
@@ -312,18 +302,18 @@ def main(fname):
             # print(f"{r.header:04x} :", r.locals[:r.args], r.locals[r.args:])
             args = []
             for n in range(1, r.args + 1):
-                Var.map[n] = f'arg{n}'
+                Var.map[n] = f'arg'
                 if r.locals[n - 1]:
-                    args.append(f"$arg{n}={r.locals[n-1]}")
+                    args.append(f"{Var(n)}={r.locals[n-1]}")
                 else:
-                    args.append(f"$arg{n}")
+                    args.append(f"{Var(n)}")
             args = ', '.join(args)
             frags.append(f"({args})")
-            for n in range(r.args + 1, len(r.locals) + 1):
-                Var.map[n] = f'local{n}'
-                if r.locals[n - 1]:
-                    frags.append(f" $local{n} = {r.locals[n-1]}")
             print(' '.join(frags))
+            for n in range(r.args + 1, len(r.locals) + 1):
+                Var.map[n] = f'local'
+                if r.locals[n - 1]:
+                    print(f"  {Var(n)} = {r.locals[n-1]}")
         else:
             print(f"{r.header:04x} :", r.locals)
             for n in range(1, len(r.locals) + 1):
