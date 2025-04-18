@@ -27,9 +27,8 @@ class Var:
     map = {}
 
     def __str__(self):
-        if self.idx in self.map:
-            return f"${self.map[self.idx]}"
-        return f"$v{self.idx}"
+        name = self.map.get(self.idx, '')
+        return f"${name}_v{self.idx}"
 
 
 @define
@@ -173,6 +172,9 @@ class Prop:
     addr: int
     data: bytes = None
 
+    def __repr__(self):
+        return f"{type(self).__name__}(num={hex(self.num)}, len={self.len}, addr={self.addr:04x}, data={self.data.hex(' ', 2)})"
+
     @property
     def value(self):
         return from_bytes(self.data)
@@ -181,6 +183,15 @@ class Prop:
     def paddr(self):
         if self.len == 2:
             return self.value * 2
+
+    @property
+    def bytes(self):
+        return list(self.data)
+
+    @property
+    def words(self):
+        assert self.len % 2 == 0
+        return [from_bytes(self.data[i : i + 2]) for i in range(0, self.len, 2)]
 
 
 @define

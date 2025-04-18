@@ -99,6 +99,10 @@ class ZMech:
     def dump(self, addr):
         print(f"{addr:04x} ", self.read(16, addr).hex(' '))
 
+    def dumpline(self, addr):
+        addr &= ~0xF
+        print(f"{addr:04x} ", self.read(16, addr).hex(' ', 2))
+
     def readB(self, addr=None, signed=False):
         if isinstance(addr, (tuple, list)) and len(addr) == 2:
             addr = addr[0] + addr[1]
