@@ -24,10 +24,10 @@ class Str:
 class Var:
     idx: int
 
-    map = None
+    map = {}
 
     def __str__(self):
-        if self.map and self.idx in self.map:
+        if self.idx in self.map:
             return f"${self.map[self.idx]}"
         return f"$v{self.idx}"
 
@@ -74,6 +74,87 @@ class Insn:
             frags.append(f"ret {str(self.br_ret).lower()}")
         if self.dst:
             frags.append(f"go [{self.dst:04x}]")
+        return ' '.join(frags).strip()
+
+    def pretty(self):
+        frags = [f"{self.addr:04x} :"]
+        args = []
+        name = self.name
+        br_dir = self.br_dir
+        out = self.out
+        dst = self.dst
+        if self.args:
+            args = self.args[:]
+            if name in (
+                'store',
+                'load',
+                'inc_chk',
+                'dec_chk',
+                'inc',
+                'dec',
+                'pull',
+            ):
+                vidx = args[0]
+                if isinstance(vidx, Imm):
+                    v = Var(vidx.value)
+                    args[0] = f"{v}"
+                elif isinstance(vidx, Var):
+                    args[0] = f"({vidx})"
+                if name == 'pull':
+                    out = args[0]
+                    args = args[1:]
+                elif name.startswith('inc'):
+                    args[0] = "++" + args[0]
+                    if name.endswith('_chk'):
+                        name = "jg"
+                elif name.startswith('dec'):
+                    args[0] = "--" + args[0]
+                    if name.endswith('_chk'):
+                        name = "jl"
+            args = list(map(str, args))
+        if name in ("loadb", "loadw", "storeb", "storew"):
+            args[0] = f"{args[0]}[{args[1]}]"
+            args[1:] = args[2:]
+        if name.startswith('store'):
+            args = [args[0], '=', *args[1:]]
+        if name == "je":
+            frags.append(f"if {args[0]}")
+            frags.append("==" if self.br_dir else "<>")
+            br_dir = True
+            frags.append(' '.join(args[1:]))
+        elif name == "jz":
+            frags.append(f"if {args[0]}")
+            frags.append("==" if self.br_dir else "<>")
+            br_dir = True
+            frags.append("0")
+        elif name == "jl":
+            frags.append(f"if {args[0]}")
+            frags.append("<" if self.br_dir else ">=")
+            br_dir = True
+            frags.append(' '.join(args[1:]))
+        elif name == "jg":
+            frags.append(f"if {args[0]}")
+            frags.append(">" if self.br_dir else "<=")
+            br_dir = True
+            frags.append(' '.join(args[1:]))
+        elif name in ("call", "jump"):
+            if args[0].startswith("0x"):
+                args[0] = f"[{dst:04x}]"
+                dst = None
+            frags.append(f"{name} {args[0]} ")
+            frags.append(' '.join(args[1:]) if args[1:] else '')
+        else:
+            frags.append(f"{name} ")
+            frags.append(' '.join(args) if args else '')
+        if out:
+            frags.append(f"-> {out}")
+        if br_dir is not None:
+            word = ["else", "then"][br_dir]
+            frags.append(word)
+        if self.br_ret is not None:
+            frags.append(f"ret {str(self.br_ret).lower()}")
+        if dst:
+            frags.append(f"go [{dst:04x}]")
         return ' '.join(frags).strip()
 
 

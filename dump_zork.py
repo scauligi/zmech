@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import copy
 import itertools
 from collections import defaultdict as ddict
 
@@ -40,22 +41,28 @@ ATTRIBUTES = {
 # 0x1f: north
 
 Var.map = {
+    0: "stack",
     16: "loc",
     17: "score",
     18: "turns",
     33: "openedCanary",
     79: "also_maybe_score",
     82: "isLight",
+    86: "verbosity_superBrief",
+    87: "verbosity_maximum",
     114: "verb_parse_info?",
     116: "cmd_parse_info?",
     125: "intext",
     126: "parse",
+    127: "you",
     129: "nwords",
     134: "subject",
     135: "object",
     136: "verb",
+    148: "tick_table",
     156: "foundSecretPath",
-    172: "verbCodeDispatchTable",
+    171: "verbDispatch171",
+    172: "verbDispatch172",
     173: "verbTable?",
 }
 
@@ -110,6 +117,7 @@ Var.map = {
 class Routine:
     header: int | None
     locals: list[int] = field(factory=list)
+    args: int | None = None
     insns: list = field(factory=list)
     bbs: set = field(factory=set)
     calls: list['Insn'] = field(factory=list)
@@ -134,7 +142,7 @@ def parse_routine(z, addr, is_start=False):
             elif insn.dst is not None:
                 r.bbs.add(insn.dst)
             if insn.name in BB_END:
-                if seen.issuperset(r.bbs):
+                if seen.issuperset(r.bbs) and z.tell() not in (0x6E4B, 0x8497):
                     break
     return r
 
@@ -165,7 +173,24 @@ def slurp_verbs(z):
     verbs_by_code = {}
     for v, wdv in itertools.groupby(verbs, key=lambda wdv: wdv[2]):
         verbs_by_code[v] = [w for w, d, v in wdv]
+    swaps = [(0x22, "enter"), (0x2B, "open"), (0x40, "give"), (0x7D, "swim")]
+    for code, verb in swaps:
+        ww = verbs_by_code[code]
+        idx = ww.index(verb)
+        ww[0], ww[idx] = ww[idx], ww[0]
+        verbs_by_code[code] = ww
     return verbs_by_code
+
+
+def print_insn(insn, verbs_by_code):
+    if insn.name == "je" and str(insn.args[0]) == '$verb':
+        insn = copy.copy(insn)
+        for i in range(1, len(insn.args)):
+            a = insn.args[i]
+            if isinstance(a, Imm):
+                if a.value in verbs_by_code:
+                    insn.args[i] = verbs_by_code[a.value][0].upper()
+    print(insn.pretty())
 
 
 def main(fname):
@@ -177,6 +202,7 @@ def main(fname):
     max_oidx = (z.obj(1)._plist - z.obj(1)._addr) // (z.obj(2)._addr - z.obj(1)._addr)
 
     notes_to_add = ddict(list)
+    call_args = ddict(int)
 
     gvar_setters = ddict(list)
 
@@ -189,31 +215,39 @@ def main(fname):
                     notes_to_add[dst].append(
                         f"({obj.idx:02x})[{obj.shortname}] prop {hex(prop.num)}"
                     )
+                    if prop.num == 0x11:
+                        call_args[dst] = 1
 
-    # there's also a call site based off of loadw $v171 0x89 [5869]
-    dst = z.readW((z.gvar(171), 0x89)) * 2
-    notes_to_add[dst].append("from [5869]: loadw $v171 0x89 -> call")
+    verbs = slurp_verbs(z)
+
+    for verbCode in range(0, 0x91 + 1):
+        dst = z.readW((z.gvar(171), verbCode)) * 2
+        if dst:
+            if verbCode in verbs:
+                vv = verbs[verbCode][0].upper()
+            else:
+                vv = f"{verbCode:02x}"
+            notes_to_add[dst].append(f"from [5869]: loadw $v171 [verb:{vv}] -> call")
 
     for verbCode in range(0, 0x91 + 1):
         dst = z.readW((z.gvar(172), verbCode)) * 2
         if dst:
-            notes_to_add[dst].append(
-                f"from [5817]: loadw $v172 [verbCode: {verbCode:02x}] -> call"
-            )
+            if verbCode in verbs:
+                vv = verbs[verbCode][0].upper()
+            else:
+                vv = f"{verbCode:02x}"
+            notes_to_add[dst].append(f"from [5817]: loadw $v172 [verb:{vv}] -> call")
 
     z.seek(z.himem)
     if z.tell() % 2 == 1:
         z.skip(1)
     while z.tell() < 0x10B16:
-        if z.tell() in (0x6E4C,):
-            a = z.tell()
-            routines[a] = z.readZ()
-            continue
         r = parse_routine(z, z.tell())
         routines[r.header] = r
         for call in r.calls:
             callhdr = call.args[0].value * 2
-            notes_to_add[callhdr].append(f"called by [{r.header:04x}]: {call}")
+            notes_to_add[callhdr].append(f"called by [{r.header:04x}]: {call.pretty()}")
+            call_args[callhdr] = max(call_args[callhdr], len(call.args[1:]))
         z.seek(r.insns[-1].end)
         if z.tell() % 2 == 1:
             z.skip(1)
@@ -224,11 +258,17 @@ def main(fname):
     except EOFError:
         pass
 
+    notes_to_add[0x54C4].append("turn_ticker")
+
     for dst, notes in notes_to_add.items():
         if dst in routines:
             routines[dst].notes.extend(notes)
         else:
             print(f"not found: [{dst:04x}]")
+
+    for dst, nargs in call_args.items():
+        r = routines[dst]
+        r.args = min(nargs, len(r.locals))
 
     for _, r in sorted(routines.items()):
         if not isinstance(r, Routine):
@@ -267,12 +307,31 @@ def main(fname):
             continue
         for note in r.notes:
             print(f";; {note}")
-        if r.header is not None:
+        if r.args is not None:
+            frags = [f"{r.header:04x} :"]
+            # print(f"{r.header:04x} :", r.locals[:r.args], r.locals[r.args:])
+            args = []
+            for n in range(1, r.args + 1):
+                Var.map[n] = f'arg{n}'
+                if r.locals[n - 1]:
+                    args.append(f"$arg{n}={r.locals[n-1]}")
+                else:
+                    args.append(f"$arg{n}")
+            args = ', '.join(args)
+            frags.append(f"({args})")
+            for n in range(r.args + 1, len(r.locals) + 1):
+                Var.map[n] = f'local{n}'
+                if r.locals[n - 1]:
+                    frags.append(f" $local{n} = {r.locals[n-1]}")
+            print(' '.join(frags))
+        else:
             print(f"{r.header:04x} :", r.locals)
+            for n in range(1, len(r.locals) + 1):
+                Var.map.pop(n, None)
         for insn in r.insns:
             if insn.addr in r.bbs and insn is not r.insns[0]:
                 print()
-            print(insn)
+            print_insn(insn, verbs)
         print()
         print()
         print()
@@ -280,7 +339,6 @@ def main(fname):
     print()
     print()
     print()
-    verbs = slurp_verbs(z)
     print('verb codes:')
     for v, ww in verbs.items():
         print(f"[{v:02x}] {' '.join(ww)}")
