@@ -91,18 +91,19 @@ def doInsn(z, insn):
             assert len(args) == 2
             _br(z, insn, args[0] & args[1] == args[1])
         case "call":
-            ret = z.tell()
             dst = 2 * args[0]
             if dst == 0:
                 z.set(insn.out, 0)
             else:
+                ret = z.tell()
                 z.seek(dst)
                 nlocals = z.readB()
                 lvars = [z.readW() for _ in range(nlocals)]
                 args = args[1:]  # since the first arg is the call target
-                assert len(args) <= len(lvars), f"{len(insn.args)=} {len(lvars)=}"
+                if len(args) > len(lvars):
+                    args = args[: len(lvars)]
                 lvars[: len(args)] = args
-                z.frames.append(Frame(ret, lvars, insn.out))
+                z.frames.append(Frame(lvars, ret, insn.out))
         case "ret":
             _ret(z, args[0])
         case "rtrue":

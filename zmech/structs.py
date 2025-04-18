@@ -160,9 +160,10 @@ class Insn:
 
 @define
 class Frame:
-    ret: int
     locals: list[int]
+    ret: int
     out: Var
+    stack: list[int] = field(factory=list)
 
 
 @define

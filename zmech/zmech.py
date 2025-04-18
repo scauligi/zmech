@@ -3,7 +3,7 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from .decoder import readInsn
-from .structs import Imm, Obj, Var
+from .structs import Frame, Imm, Obj, Var
 from .util import _s, _u, from_bytes, printd, to_bytes
 from .vm import doInsn
 from .zscii import zdecode
@@ -30,7 +30,6 @@ class ZMech:
         self.default_props = None
 
         self.frames = []
-        self.stack = []
         self.ended = False
 
     def load(self):
@@ -47,8 +46,7 @@ class ZMech:
             for n in range(1, 32):
                 self.default_props[n] = self.readW()
 
-        self.frames = []
-        self.stack = [0]
+        self.frames = [Frame([], -1, Var(-1))]
 
         self.seek(self.init_pc)
         self.ended = False
@@ -177,6 +175,10 @@ class ZMech:
     def readInsn(self, addr=None):
         with self.seek(addr):
             return readInsn(self)
+
+    @property
+    def stack(self):
+        return self.frames[-1].stack
 
     def eval(self, arg, _indirect=False):
         match arg:
