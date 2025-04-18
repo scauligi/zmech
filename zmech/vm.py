@@ -2,7 +2,7 @@ import random
 import re
 
 from .structs import Frame, Var
-from .util import _s, printd
+from .util import _s, from_bytes, printd
 
 
 def _ret(z, val):
@@ -282,9 +282,63 @@ def doInsn(z, insn):
             parsep = args[1]
 
             maxchars = z.readB(bufp)
-            z.show_status()
             try:
-                s = input().lower().encode()[:maxchars] + b'\0'
+                while True:
+                    z.show_status()
+                    s = input()
+                    ww = s.split()
+                    if ww:
+                        if ww[0] == 'o':
+                            oidx = int(ww[1], 16)
+                            o = z.obj(oidx)
+                            print(o, o.parent, len(list(o.children())), sorted(o.attrs))
+                            for p in o.props():
+                                print('   ', p)
+                            continue
+                        elif ww[0] == 'g':
+                            gidx = int(ww[1])
+                            print(format(z.gvar(gidx), "04x"))
+                            continue
+                        elif ww[0] == 'x':
+                            loc = z.obj(z.gvar(16))
+                            names = {
+                                0x13: 'LAND',
+                                0x14: 'EXIT',
+                                0x15: 'ENTER',
+                                0x16: 'DOWN',
+                                0x17: 'UP',
+                                0x18: 'SW',
+                                0x19: 'SE',
+                                0x1A: 'NW',
+                                0x1B: 'NE',
+                                0x1C: 'S',
+                                0x1D: 'W',
+                                0x1E: 'E',
+                                0x1F: 'N',
+                            }
+                            for pnum, name in names.items():
+                                if p := loc.prop(pnum):
+                                    if p.len >= 2:
+                                        if p.len % 2 == 0 and (
+                                            paddr := from_bytes(p.data[-2:])
+                                        ):
+                                            print(f"{name}:", z.readZ(paddr * 2))
+                                        for i in range(
+                                            0, p.len - (2 if p.len % 2 == 0 else 0), 2
+                                        ):
+                                            if p.bytes[i]:
+                                                print(
+                                                    f"{name}:",
+                                                    z.obj(p.bytes[i]),
+                                                    "via",
+                                                    z.obj(p.bytes[i + 1]),
+                                                )
+                                    else:
+                                        if p.value:
+                                            print(f"{name}:", z.obj(p.value))
+                            continue
+                    break
+                s = s.lower().encode()[:maxchars] + b'\0'
             except EOFError:
                 s = b"\0"
             with z.seek(bufp + 1):
