@@ -4,8 +4,6 @@ import copy
 import itertools
 from collections import defaultdict as ddict
 
-from attrs import define, field
-
 from zmech import ZMech
 from zmech.disasm import Routine, parse_routine
 from zmech.structs import Imm, Var
