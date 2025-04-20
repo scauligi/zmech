@@ -1,6 +1,7 @@
 import io
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
+from typing import overload
 
 from .decoder import readInsn
 from .structs import Frame, Imm, Obj, Var
@@ -20,6 +21,8 @@ class ZMech:
         self.staticmem = 0
         self.globalmem = 0
         self.init_pc = 0
+        self.dict_start = 0
+        self.abbrev_start = 0
 
         self.seps = None
         self.dict = None
@@ -35,12 +38,14 @@ class ZMech:
     def load(self):
         self.himem = self.readW(0x04)
         self.init_pc = self.readW(0x06)
+        self.dict_start = self.readW(0x08)
         self.object_table = self.readW(0x0A)
         self.globalmem = self.readW(0x0C)
         self.staticmem = self.readW(0x0E)
+        self.abbrev_start = self.readW(0x18)
 
-        self.load_dictionary()  # 0x08
-        self.load_abbrevs()  # 0x18
+        self.load_dictionary()
+        self.load_abbrevs()
         with self.seek(self.object_table):
             self.default_props = {}
             for n in range(1, 32):
@@ -87,6 +92,10 @@ class ZMech:
     def skip(self, n):
         self.fp.seek(n, 1)
 
+    @overload
+    def read(self, sz, addr=..., signed: None = ...) -> bytes: ...
+    @overload
+    def read(self, sz, addr=..., signed: bool = ...) -> int: ...
     def read(self, sz, addr=None, signed=None):
         with self.seek(addr):
             res = self.fp.read(sz)
@@ -154,8 +163,7 @@ class ZMech:
     def load_dictionary(self):
         self.seps = set()
         self.dict = {}
-        dict_start = self.readW(0x08)
-        with self.seek(dict_start):
+        with self.seek(self.dict_start):
             n = self.readB()
             for _ in range(n):
                 zc = self.readB()
@@ -170,8 +178,7 @@ class ZMech:
 
     def load_abbrevs(self):
         self.abbrevs = []
-        abbrev_start = self.readW(0x18)
-        with self.seek(abbrev_start):
+        with self.seek(self.abbrev_start):
             for _ in range(32 * 3):
                 addr = self.readW()
                 self.abbrevs.append(self.readZ(addr * 2, use_abbrevs=False))

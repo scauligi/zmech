@@ -190,7 +190,7 @@ class Prop:
 
     @property
     def words(self):
-        assert self.len % 2 == 0
+        # assert self.len % 2 == 0
         return [from_bytes(self.data[i : i + 2]) for i in range(0, self.len, 2)]
 
 

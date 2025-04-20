@@ -2,7 +2,7 @@ import random
 import re
 
 from .structs import Frame, Var
-from .util import _s, from_bytes, printd
+from .util import _s, printd
 
 
 def _ret(z, val):
@@ -300,7 +300,9 @@ def doInsn(z, insn):
                             print(format(z.gvar(gidx), "04x"))
                             continue
                         elif ww[0] == 'x':
-                            loc = z.obj(z.gvar(16))
+                            oidx = int(ww[1], 16) if len(ww) > 1 else z.gvar(16)
+                            loc = z.obj(oidx)
+                            print(loc)
                             names = {
                                 0x13: 'LAND',
                                 0x14: 'EXIT',
@@ -318,24 +320,27 @@ def doInsn(z, insn):
                             }
                             for pnum, name in names.items():
                                 if p := loc.prop(pnum):
-                                    if p.len >= 2:
-                                        if p.len % 2 == 0 and (
-                                            paddr := from_bytes(p.data[-2:])
-                                        ):
-                                            print(f"{name}:", z.readZ(paddr * 2))
-                                        for i in range(
-                                            0, p.len - (2 if p.len % 2 == 0 else 0), 2
-                                        ):
-                                            if p.bytes[i]:
-                                                print(
-                                                    f"{name}:",
-                                                    z.obj(p.bytes[i]),
-                                                    "via",
-                                                    z.obj(p.bytes[i + 1]),
-                                                )
-                                    else:
-                                        if p.value:
-                                            print(f"{name}:", z.obj(p.value))
+                                    print(f"  {name}: ", end='')
+                                    if p.len == 1:
+                                        print(z.obj(p.value))
+                                    elif p.len == 2:
+                                        print(z.readZ(p.paddr))
+                                    elif p.len == 3:
+                                        paddr = p.words[0] * 2
+                                        print(f"call [{paddr:04x}]")
+                                    elif p.len == 4:
+                                        d = z.obj(p.bytes[0])
+                                        msg = ""
+                                        if p.words[1]:
+                                            msg = z.readZ(p.words[1] * 2)
+                                        print(f"{d} if {Var(p.bytes[1])} / {msg}")
+                                    elif p.len == 5:
+                                        d = z.obj(p.bytes[0])
+                                        o = z.obj(p.bytes[1])
+                                        msg = ""
+                                        if p.words[1]:
+                                            msg = z.readZ(p.words[1] * 2)
+                                        print(f"{d} via {o} / {msg}")
                             continue
                     break
                 s = s.lower().encode()[:maxchars] + b'\0'
