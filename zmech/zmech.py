@@ -35,6 +35,7 @@ class ZMech:
 
         self.default_props = None
 
+        self.print_buffer = ""
         self.frames = []
         self.ended = False
 
@@ -57,8 +58,8 @@ class ZMech:
             for n in range(1, 32):
                 self.default_props[n] = self.readW()
 
+        self.print_buffer = ""
         self.frames = [Frame([], -1, Var(-1))]
-
         self.seek(self.init_pc)
         self.ended = False
 
@@ -226,6 +227,15 @@ class ZMech:
         else:
             return self.writeW((self.globalmem, vidx - 16), val)
 
+    def print(self, s):
+        if not s:
+            return
+        ss = s.split('\n')
+        ss[0] = self.print_buffer + ss[0]
+        for s in ss[:-1]:
+            print(s)
+        self.print_buffer = ss[-1]
+
     def show_status(self):
         # technically, check bit 1 of Flags 1 as to whether this is a score or time game
         loc = self.obj(self.gvar(16))
@@ -238,6 +248,10 @@ class ZMech:
         print(f"{loc!s} / {score} / {turns}", end='', flush=True)
         print('\x1b[0m', end='', flush=True)
         print('\x1b[?1048l', end='', flush=True)
+
+    def prompt(self):
+        self.show_status()
+        return input(self.print_buffer)
 
     def step(self):
         insn = self.readInsn()

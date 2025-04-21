@@ -1,5 +1,6 @@
 import random
 import re
+from contextlib import suppress
 
 from .structs import Frame, Var
 from .util import _s, printd
@@ -24,6 +25,81 @@ def _br(z, insn, br_dir):
             )
     else:
         printd(f"  (fallthru: {insn.br_dir} != {br_dir})")
+
+
+def debugPrompt(z):
+    try:
+        while True:
+            s = z.prompt()
+            ww = s.split()
+            if ww:
+                if ww[0] == '$o':
+                    with suppress(Exception):
+                        oidx = int(ww[1], 16)
+                        o = z.obj(oidx)
+                        print(o, ' '.join(sorted(f"{a:02x}" for a in o.attrs)))
+                        print(f"      parent: {o.parent}")
+                        print(f"      children:")
+                        for c in o.children():
+                            print(f"        {c}")
+                        for p in o.props():
+                            print('   ', p)
+                    continue
+                elif ww[0] == '$g':
+                    with suppress(Exception):
+                        gidx = int(ww[1])
+                        print(format(z.gvar(gidx), "04x"))
+                    continue
+                elif ww[0] == '$x':
+                    with suppress(Exception):
+                        oidx = int(ww[1], 16) if len(ww) > 1 else z.gvar(16)
+                        loc = z.obj(oidx)
+                        print(loc)
+                        names = {
+                            0x13: 'LAND',
+                            0x14: 'EXIT',
+                            0x15: 'ENTER',
+                            0x16: 'DOWN',
+                            0x17: 'UP',
+                            0x18: 'SW',
+                            0x19: 'SE',
+                            0x1A: 'NW',
+                            0x1B: 'NE',
+                            0x1C: 'S',
+                            0x1D: 'W',
+                            0x1E: 'E',
+                            0x1F: 'N',
+                        }
+                        for pnum, name in names.items():
+                            if p := loc.prop(pnum):
+                                print(f"  {name}: ", end='')
+                                if p.len == 1:
+                                    print(z.obj(p.value))
+                                elif p.len == 2:
+                                    print(z.readZ(p.paddr))
+                                elif p.len == 3:
+                                    paddr = p.words[0] * 2
+                                    print(f"call [{paddr:04x}]")
+                                elif p.len == 4:
+                                    d = z.obj(p.bytes[0])
+                                    msg = ""
+                                    if p.words[1]:
+                                        msg = z.readZ(p.words[1] * 2)
+                                    print(f"{d} if {Var(p.bytes[1])} / {msg}")
+                                elif p.len == 5:
+                                    d = z.obj(p.bytes[0])
+                                    o = z.obj(p.bytes[1])
+                                    msg = ""
+                                    if p.words[1]:
+                                        msg = z.readZ(p.words[1] * 2)
+                                    print(f"{d} via {o} / {msg}")
+                    continue
+            break
+    except EOFError:
+        z.ended = True
+        return ""
+    z.print_buffer = ""
+    return s
 
 
 def doInsn(z, insn):
@@ -145,23 +221,23 @@ def doInsn(z, insn):
         case "verify" | "piracy":
             _br(z, insn, True)
         case "print":
-            print(insn.args[0].s, end='')
+            z.print(insn.args[0].s)
         case "print_ret":
-            print(insn.args[0].s)
+            z.print(insn.args[0].s + "\n")
             _ret(z, 1)
         case "print_char":
-            print(chr(args[0]), end='')
+            z.print(chr(args[0]))
         case "print_num":
-            print(_s(args[0]), end='')
+            z.print(str(_s(args[0])))
         case "print_addr":
-            print(z.readZ(args[0]), end='')
+            z.print(z.readZ(args[0]))
         case "print_paddr":
-            print(z.readZ(args[0] * 2), end='')
+            z.print(z.readZ(args[0] * 2))
         case "print_obj":
             o = z.obj(args[0])
-            print(o.shortname, end='')
+            z.print(o.shortname)
         case "new_line":
-            print()
+            z.print("\n")
         case "test_attr":
             if args[0] == 0:
                 _br(z, insn, False)
@@ -282,70 +358,8 @@ def doInsn(z, insn):
             parsep = args[1]
 
             maxchars = z.readB(bufp)
-            try:
-                while True:
-                    z.show_status()
-                    s = input()
-                    ww = s.split()
-                    if ww:
-                        if ww[0] == 'o':
-                            oidx = int(ww[1], 16)
-                            o = z.obj(oidx)
-                            print(o, o.parent, len(list(o.children())), sorted(o.attrs))
-                            for p in o.props():
-                                print('   ', p)
-                            continue
-                        elif ww[0] == 'g':
-                            gidx = int(ww[1])
-                            print(format(z.gvar(gidx), "04x"))
-                            continue
-                        elif ww[0] == 'x':
-                            oidx = int(ww[1], 16) if len(ww) > 1 else z.gvar(16)
-                            loc = z.obj(oidx)
-                            print(loc)
-                            names = {
-                                0x13: 'LAND',
-                                0x14: 'EXIT',
-                                0x15: 'ENTER',
-                                0x16: 'DOWN',
-                                0x17: 'UP',
-                                0x18: 'SW',
-                                0x19: 'SE',
-                                0x1A: 'NW',
-                                0x1B: 'NE',
-                                0x1C: 'S',
-                                0x1D: 'W',
-                                0x1E: 'E',
-                                0x1F: 'N',
-                            }
-                            for pnum, name in names.items():
-                                if p := loc.prop(pnum):
-                                    print(f"  {name}: ", end='')
-                                    if p.len == 1:
-                                        print(z.obj(p.value))
-                                    elif p.len == 2:
-                                        print(z.readZ(p.paddr))
-                                    elif p.len == 3:
-                                        paddr = p.words[0] * 2
-                                        print(f"call [{paddr:04x}]")
-                                    elif p.len == 4:
-                                        d = z.obj(p.bytes[0])
-                                        msg = ""
-                                        if p.words[1]:
-                                            msg = z.readZ(p.words[1] * 2)
-                                        print(f"{d} if {Var(p.bytes[1])} / {msg}")
-                                    elif p.len == 5:
-                                        d = z.obj(p.bytes[0])
-                                        o = z.obj(p.bytes[1])
-                                        msg = ""
-                                        if p.words[1]:
-                                            msg = z.readZ(p.words[1] * 2)
-                                        print(f"{d} via {o} / {msg}")
-                            continue
-                    break
-                s = s.lower().encode()[:maxchars] + b'\0'
-            except EOFError:
-                s = b"\0"
+            s = debugPrompt(z)
+            s = s.lower().encode()[:maxchars] + b'\0'
             with z.seek(bufp + 1):
                 z.fp.write(s)
 
