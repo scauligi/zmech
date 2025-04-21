@@ -137,8 +137,11 @@ class Insn:
             br_dir = False
             frags.append(' '.join(args[1:]))
         elif name in ("call", "jump"):
-            if args[0].startswith("0x"):
+            if isinstance(dst, int) and args[0].startswith("0x"):
                 args[0] = f"[{dst:04x}]"
+                dst = None
+            elif isinstance(dst, str):
+                args[0] = f"[{dst}]"
                 dst = None
             frags.append(f"{name} {args[0]} ")
             frags.append(' '.join(args[1:]) if args[1:] else '')
@@ -153,7 +156,9 @@ class Insn:
         if self.br_ret is not None:
             frags.append(f"ret {str(self.br_ret).lower()}")
         if dst:
-            frags.append(f"go [{dst:04x}]")
+            if isinstance(dst, int):
+                dst = format(dst, "04x")
+            frags.append(f"go [{dst}]")
         return ' '.join(frags).strip()
 
 

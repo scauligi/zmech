@@ -136,7 +136,8 @@ Var.map = {
     18: "turns",
     27: "pcGameLoop",
     33: "bOpenedCanary",
-    43: "pBrassLantern",
+    41: "pCandleTicker",
+    43: "pBrassLampTicker",
     # w[0] -> ???
     # w[1] -> pzMsg to display when timer ticks out
     44: "pzThiefDescrUnconscious",
@@ -397,7 +398,7 @@ ROUTINES = {
     ],
     0x101C6: ["find_enemies", "loc", "oCur"],
     0x101E0: ["thief_ticker"],
-    0x10666: ["player_dies", 'psMsg'],
+    0x10666: ["player_dies", 'pzMsg'],
 }
 
 
@@ -412,7 +413,7 @@ def _dst(dst, paddr=False):
     return f"[{v:04x}]"
 
 
-def print_insn(z, insn):
+def print_insn(z, insn, block_labels=None):
     def _obj(code):
         if isinstance(n := _tr_imm(code), int) and 0 < n < 256:
             o = z.obj(n)
@@ -420,6 +421,8 @@ def print_insn(z, insn):
         return code
 
     insn = copy.copy(insn)
+    notes = ""
+
     if insn.name == "je":
         match str(insn.args[0]):
             case '$action_v136':
@@ -461,11 +464,19 @@ def print_insn(z, insn):
                     insn.args[i] = _dst(insn.args[i], paddr=True)
                 elif re.match(r'o[A-Z]', rinfo[i]):
                     insn.args[i] = _obj(insn.args[i])
+                elif re.match(r'pz[A-Z]', rinfo[i]):
+                    if p := _tr_imm(insn.args[i]):
+                        s = z.readZ(p * 2)
+                        insn.args[i] = f"({p:04x})"
+                        s = s.replace('"', '\"')
+                        notes += f'  ; "{s}"'
         dst = _dst(insn.args[0], paddr=True)
         if dst != insn.args[0]:
             insn.args[0] = dst
             insn.dst = None
-    print(insn.pretty())
+    if block_labels and insn.dst in block_labels:
+        insn.dst = block_labels[insn.dst]
+    print(insn.pretty() + notes)
 
 
 def main(fname):
@@ -669,12 +680,15 @@ def main(fname):
             mem_markers.append((pstart, pend, 'property lists'))
             break
 
+    # v43 brass lantern timer data
+    mem_markers.append((w := z.gvar(43), w + 14, f'{Var(43)}'))
+
     # v170 pronoun table
     mem_markers.append((w := z.gvar(170), w + 2 + 4 * z.readW(w), f'{Var(170)}'))
 
     # potential global pointers
     for vidx in range(16, 256):
-        if vidx in {35, 170, 27}:
+        if vidx in {35, 170, 27, 43}:
             continue
         v = z.gvar(vidx)
         if z.globalmem + 2 * (203 - 16) <= v and vidx not in {44, 45}:
@@ -855,10 +869,16 @@ def main(fname):
             for n in range(1, len(r.locals) + 1):
                 if r.locals[n - 1]:
                     print(f"  {Var(n)} = {r.locals[n-1]}")
+        loops = {}
         for insn in r.insns:
             if insn.addr in r.bbs:  # and insn is not r.insns[0]:
                 print()
-            print_insn(z, insn)
+            if insn.addr in r.back_jumps:
+                loop_counter = len(loops) + 1
+                label = f".L{loop_counter}"
+                loops[insn.addr] = label
+                print(f"{label}:")
+            print_insn(z, insn, loops)
         print()
         print()
         print()

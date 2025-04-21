@@ -12,6 +12,7 @@ class Routine:
     args: int | None = None
     insns: list = field(factory=list)
     bbs: set = field(factory=set)
+    back_jumps: set = field(factory=set)
     calls: list[Insn] = field(factory=list)
     notes: list[str] = field(factory=list)
 
@@ -45,6 +46,8 @@ def parse_routine(z, addr=None, header=True, r=None):
                 r.calls.append(insn)
             elif insn.dst is not None:
                 r.bbs.add(insn.dst)
+                if insn.dst < insn.addr:
+                    r.back_jumps.add(insn.dst)
             if insn.name in BB_END:
                 if seen.issuperset(r.bbs):
                     break
