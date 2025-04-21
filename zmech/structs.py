@@ -118,23 +118,23 @@ class Insn:
             args = [args[0], '=', *args[1:]]
         if name == "je":
             frags.append(f"if {args[0]}")
-            frags.append("==" if self.br_dir else "<>")
-            br_dir = True
+            frags.append("<>" if self.br_dir else "==")
+            br_dir = False
             frags.append(' '.join(args[1:]))
         elif name == "jz":
             frags.append(f"if {args[0]}")
-            frags.append("==" if self.br_dir else "<>")
-            br_dir = True
+            frags.append("<>" if self.br_dir else "==")
+            br_dir = False
             frags.append("0")
         elif name == "jl":
             frags.append(f"if {args[0]}")
-            frags.append("<" if self.br_dir else ">=")
-            br_dir = True
+            frags.append(">=" if self.br_dir else "<")
+            br_dir = False
             frags.append(' '.join(args[1:]))
         elif name == "jg":
             frags.append(f"if {args[0]}")
-            frags.append(">" if self.br_dir else "<=")
-            br_dir = True
+            frags.append("<=" if self.br_dir else ">")
+            br_dir = False
             frags.append(' '.join(args[1:]))
         elif name in ("call", "jump"):
             if args[0].startswith("0x"):
