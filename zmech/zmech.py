@@ -24,6 +24,9 @@ class ZMech:
         self.dict_start = 0
         self.abbrev_start = 0
 
+        self.revision = 0
+        self.serial = None
+
         self.seps = None
         self.dict = None
         self.abbrevs = None
@@ -43,6 +46,9 @@ class ZMech:
         self.globalmem = self.readW(0x0C)
         self.staticmem = self.readW(0x0E)
         self.abbrev_start = self.readW(0x18)
+
+        self.revision = self.readW(0x02)
+        self.serial = self.read(6, 0x12).decode('ascii')
 
         self.load_dictionary()
         self.load_abbrevs()
