@@ -3,10 +3,12 @@
 import copy
 import re
 from collections import defaultdict as ddict
+from contextlib import suppress
 
 from zmech import ZMech
 from zmech.disasm import Routine, parse_routine
 from zmech.structs import Imm, Var
+from zmech.util import from_bytes
 
 
 def _tr_imm(imm):
@@ -18,6 +20,7 @@ def _tr_imm(imm):
 
 
 ATTRIBUTES = {
+    0x00: "WEARABLE",
     0x03: "LONG_DESC_SEEN",
     0x06: "?ROOM",
     0x07: "HIDDEN",
@@ -50,12 +53,26 @@ def _attr(code):
 
 
 PROPERTIES = {
-    0x2: "?Paddr_0x2",
+    0x2: "?NeverSet_0x2",
     0x4: "?Interactables",
     0x5: "?InteractableObjs",
     0x9: "?Paddr_0x9",
     0xA: "Space",
     0xB: "Description",
+    0x11: "OverrideAction",
+    0x13: "LandViaBoat",
+    0x14: "Exit",
+    0x15: "Enter",
+    0x16: "Down",
+    0x17: "Up",
+    0x18: "Southwest",
+    0x19: "Southeast",
+    0x1A: "Northwest",
+    0x1B: "Northeast",
+    0x1C: "South",
+    0x1D: "West",
+    0x1E: "East",
+    0x1F: "North",
 }
 
 
@@ -72,12 +89,14 @@ def _prop(code):
 # 0x9: TODO unknown callable paddr
 # 0xa: amount of room for putting things in (see prop 0xf)
 # 0xb: first-encounter text?
-# 0xc: point score value? for taking? see @a3f0 in [a3e0]
+# 0xc: point score value? for taking? see @a3f0 in [a3e0] ; also saved prevGlowLevel for (6e)[sword]
 # 0xd: point score value? eg for finding (a3)[large emerald]
 # 0xe: paddr of out-in-world description for nouns
 # 0xf: size/weight
 # 0x10: list-of-adj-codes to I guess disambiguate this noun
 # 0x11 callable paddr (interact specialization?):
+#   (): override for if this obj is current actor or if this obj is direct or indirect object
+#   0x1: override for if this object is parent of current actor (eg cur location, or boat?)
 #   0x3: print long/first-visit description
 #   0x4: print short/repeat-visit description (probably)
 #   0x6: perform "take" failure?
@@ -115,14 +134,20 @@ Var.map = {
     16: "loc",
     17: "score",
     18: "turns",
-    27: "gameLoop_paddr",
-    33: "openedCanary",
-    44: "thiefDescrUnconscious_paddr",
-    45: "thiefDescr_paddr",
-    77: "deathCount",
-    78: "playerDead",
+    27: "pcGameLoop",
+    33: "bOpenedCanary",
+    43: "pBrassLantern",
+    # w[0] -> ???
+    # w[1] -> pzMsg to display when timer ticks out
+    44: "pzThiefDescrUnconscious",
+    45: "pzThiefDescr",
+    60: "bMirrorBroken",
+    76: "bGoodLuck",
+    77: "nDeaths",
+    78: "bPlayerDead",
     79: "also_maybe_score",
-    82: "isLight",
+    82: "bLight",
+    85: "nHelloSailors",
     86: "verbosity_superBrief",
     87: "verbosity_maximum",
     107: "?_attr",
@@ -134,6 +159,8 @@ Var.map = {
     # w[2] -> noun code for noun 1
     # w[3] -> noun code for noun 2
     # w[4] -> ??? not sure where set, but used at [612e]
+    122: "oPrevLoc",
+    123: "oPrevDirect",
     124: "phraseStart",  # eg when speaking to another character
     125: "intext",
     126: "parse",
@@ -142,18 +169,21 @@ Var.map = {
     134: "direct",
     135: "indirect",
     136: "action",
-    137: "?playerIsGhost",
-    144: "you",
+    137: "?bPlayerIsGhost",
+    144: "player",
+    146: "tickTableCur",
+    147: "tickTableCur2",
     148: "tick_table",
-    156: "foundSecretPath",
-    157: "trollDead",
-    159: "cyclopsHole",
-    161: "banishedGhosts",
-    164: "boatDeflated",
-    165: "cyclopsClear",
+    156: "bFoundSecretPath",
+    157: "bTrollDead",
+    159: "bCyclopsHole",
+    161: "bBanishedGhosts",
+    164: "bBoatDeflated",
+    165: "bCyclopsClear",
+    168: "lowestDirPropNum",
     170: "pronounTable",
     171: "verbDispatch",
-    172: "verbDispatch",
+    172: "verbIndirectDispatch",
     173: "grammarTable",
 }
 
@@ -316,21 +346,88 @@ def _action(code):
     return code
 
 
+ROUTINES = {
+    0x4E42: ["roll_d100_d300"],
+    0x4E5C: ["pick_random_el"],
+    0x4F04: ["__start"],
+    0x50D0: ["nothing"],
+    0x5472: ["set_ticker", 'pcCallback', 'nTicks', 'pTickEl'],
+    0x5486: [
+        "find_or_create_ticker",
+        'pcCallback',
+        'bAlsoTick2nd',
+        'tickTableEnd',
+        'pTickEl',
+        'pNewTickEl',
+    ],
+    0x54C4: ["turn_ticker", 'pTickEl', 'tickTableEnd', 'nTicks', 'bHandledAny'],
+    0x552A: ["main_game_loop"],
+    0x577C: [
+        "perform_action",
+        'tmpAction',
+        'tmpDirect',
+        'tmpIndirect',
+        'bHandled',
+        'savedAction',
+        'savedDirect',
+        'savedIndirect',
+    ],
+    0x6C62: ["is_there_light"],
+    0x6EE0: ["print_intro"],
+    0x7712: ["handle_eating", 'bEdible', 'bDrinkable'],
+    0x78BA: ["remove_object", 'obj', 'bWasLight'],
+    0x7E04: ["force_describe_loc_and_contents"],
+    0x8C9A: ["describe_loc", "bForceVerbose", "bDoLongDesc"],
+    0x8D4E: ["describe_loc_contents", "bForceVerbose"],
+    0x8EAA: ["print_contents"],
+    0x9062: ["add_to_score"],
+    0x92B6: [None, 'oArg'],
+    0x9470: [None, 'oArg'],
+    0x9530: ["overwrite_prev_direct", "newDirect"],
+    0xDEAA: ["brass_lantern_battery_timer"],
+    0xDED4: ["candle_timer"],
+    0x100F8: [
+        "sword_glow",
+        "pSwordTickEl",
+        "prevGlowLevel",
+        "glowLevel",
+        "?propNum",
+        "propAddr",
+        "propLen",
+    ],
+    0x101C6: ["find_enemies", "loc", "oCur"],
+    0x101E0: ["thief_ticker"],
+    0x10666: ["player_dies", 'psMsg'],
+}
+
+
+def _dst(dst, paddr=False):
+    v = _tr_imm(dst)
+    if not v:
+        return dst
+    if paddr:
+        v *= 2
+    if (info := ROUTINES.get(v)) and info[0]:
+        return f"[{info[0]}]"
+    return f"[{v:04x}]"
+
+
 def print_insn(z, insn):
     def _obj(code):
         if isinstance(n := _tr_imm(code), int) and 0 < n < 256:
             o = z.obj(n)
-            return f'({n:02x})["{o.shortname}"]'
+            return f'(0x{n:02x})["{o.shortname}"]'
         return code
 
     insn = copy.copy(insn)
     if insn.name == "je":
-        if str(insn.args[0]) == '$action_v136':
-            for i in range(1, len(insn.args)):
-                insn.args[i] = _action(insn.args[i])
-        elif str(insn.args[0]) == '$loc_v16':
-            for i in range(1, len(insn.args)):
-                insn.args[i] = _obj(insn.args[i])
+        match str(insn.args[0]):
+            case '$action_v136':
+                for i in range(1, len(insn.args)):
+                    insn.args[i] = _action(insn.args[i])
+            case '$loc_v16' | '$direct_v134' | '$indirect_v135' | "$actor_v127":
+                for i in range(1, len(insn.args)):
+                    insn.args[i] = _obj(insn.args[i])
     if insn.name in (
         "jin",
         "test_attr",
@@ -352,6 +449,22 @@ def print_insn(z, insn):
         insn.args[1] = _attr(insn.args[1])
     if insn.name in ("get_prop", "get_prop_addr", "put_prop"):
         insn.args[1] = _prop(insn.args[1])
+    if insn.name in ("call",):
+        with suppress(KeyError, IndexError, AttributeError):
+            rinfo = ROUTINES[insn.dst]
+            for i in range(1, len(insn.args)):
+                if 'Action' in rinfo[i]:
+                    insn.args[i] = _action(insn.args[i])
+                elif 'Direct' in rinfo[i] or 'Indirect' in rinfo[i]:
+                    insn.args[i] = _obj(insn.args[i])
+                elif re.match(r'pc[A-Z]', rinfo[i]):
+                    insn.args[i] = _dst(insn.args[i], paddr=True)
+                elif re.match(r'o[A-Z]', rinfo[i]):
+                    insn.args[i] = _obj(insn.args[i])
+        dst = _dst(insn.args[0], paddr=True)
+        if dst != insn.args[0]:
+            insn.args[0] = dst
+            insn.dst = None
     print(insn.pretty())
 
 
@@ -369,6 +482,20 @@ def main(fname):
     gvar_setters = ddict(list)
 
     notes_to_add[z.init_pc - 1].append('<start>')
+    notes_to_add[0xF5AA].append(f"see [10872]")
+
+    for a in (
+        0x4E38,
+        0x5018,
+        0x506A,
+        0x545C,
+        0x635E,
+        0x947E,
+        0x94DC,
+        0xECDE,
+        0xF4EA,
+    ):
+        notes_to_add[a].append(f"unused? maybe debugging?")
 
     # slurp call targets from props 0x2, 0x9, and 0x11
     # TODO slurp call targets for len 3 directions
@@ -378,16 +505,24 @@ def main(fname):
             if prop.num in [0x2, 0x9, 0x11]:
                 if dst := prop.paddr:
                     notes_to_add[dst].append(
-                        f"({obj.idx:02x})[{obj.shortname}] prop {hex(prop.num)}"
+                        f"({obj.idx:02x})[{obj.shortname}] {_prop(prop.num)} (prop {hex(prop.num)})"
                     )
                     if prop.num == 0x11:
                         call_args[dst] = 1
-            if prop.num in [0x4]:
+            elif prop.num in [0x4]:
                 words = prop.words
                 for i in range(0, len(words), 2):
                     item = z.readZ(words[i])
                     dst = words[i + 1] * 2
-                    notes_to_add[dst].append(f"{obj} prop {hex(prop.num)} : {item}")
+                    notes_to_add[dst].append(
+                        f"{obj} {_prop(prop.num)} (prop {hex(prop.num)}) : {item}"
+                    )
+            elif 0x13 <= prop.num <= 0x1F and prop.len == 3:
+                dst = from_bytes(prop.data[:2]) * 2
+                if dst:
+                    notes_to_add[dst].append(
+                        f"({obj.idx:02x})[{obj.shortname}] {_prop(prop.num)} (prop {hex(prop.num)})"
+                    )
 
     for code in range(0, 0x91 + 1):
         dst = z.readW((z.gvar(171), code)) * 2
@@ -404,6 +539,7 @@ def main(fname):
                 f"from [5817]: loadw {Var(172)} {_action(code)} -> call"
             )
 
+    # parse all routines, by sequentially scanning through instruction memory
     z.seek(z.himem)
     if z.tell() % 2 == 1:
         z.skip(1)
@@ -414,8 +550,15 @@ def main(fname):
         routines[r.header] = r
         for call in r.calls:
             callhdr = call.args[0].value * 2
-            notes_to_add[callhdr].append(f"called by [{r.header:04x}]: {call.pretty()}")
+            calledby = _dst(r.header)
+            notes_to_add[callhdr].append(f"called by {calledby}: {call.pretty()}")
             call_args[callhdr] = max(call_args[callhdr], len(call.args[1:]))
+            if callhdr in (0x5472, 0x5486) and (pcCb := _tr_imm(call.args[1])):
+                pcCb *= 2
+                notes_to_add[pcCb].append(
+                    f"ticker callback, set by {calledby}: {call.pretty()}"
+                )
+                call_args[pcCb] = max(call_args[pcCb], 0)
         z.seek(r.insns[-1].end)
         if z.tell() % 2 == 1:
             z.skip(1)
@@ -425,8 +568,6 @@ def main(fname):
             routines[a] = z.readZ()
     except EOFError:
         pass
-
-    notes_to_add[0x54C4].append("turn_ticker")
 
     # check that we have routines for all expected sites
     for dst, notes in notes_to_add.items():
@@ -675,12 +816,26 @@ def main(fname):
             continue
         for note in r.notes:
             print(f";; {note}")
+        rinfo = None
+        if rstart in ROUTINES:
+            rinfo = ROUTINES[rstart]
+            if rinfo[0]:
+                print(f"{rinfo[0]}:")
+        for n in range(1, 16):
+            Var.map.pop(n, None)
+        if rinfo:
+            for n, name in enumerate(rinfo[1:], start=1):
+                if name is not None:
+                    Var.map[n] = name
         if r.args is not None:
             frags = [f"{r.header:04x} :"]
             # print(f"{r.header:04x} :", r.locals[:r.args], r.locals[r.args:])
             args = []
             for n in range(1, r.args + 1):
-                Var.map[n] = f'arg'
+                Var.map.setdefault(n, 'arg')
+            for n in range(r.args + 1, len(r.locals) + 1):
+                Var.map.setdefault(n, 'local')
+            for n in range(1, r.args + 1):
                 if r.locals[n - 1]:
                     args.append(f"{Var(n)}={r.locals[n-1]}")
                 else:
@@ -689,13 +844,17 @@ def main(fname):
             frags.append(f"({args})")
             print(' '.join(frags))
             for n in range(r.args + 1, len(r.locals) + 1):
-                Var.map[n] = f'local'
                 if r.locals[n - 1]:
                     print(f"  {Var(n)} = {r.locals[n-1]}")
+                elif Var.map[n] != 'local':
+                    print(f"  {Var(n)}")
+                else:
+                    print(f"  | {Var(n)}")
         else:
             print(f"{r.header:04x} :", r.locals)
             for n in range(1, len(r.locals) + 1):
-                Var.map.pop(n, None)
+                if r.locals[n - 1]:
+                    print(f"  {Var(n)} = {r.locals[n-1]}")
         for insn in r.insns:
             if insn.addr in r.bbs:  # and insn is not r.insns[0]:
                 print()
