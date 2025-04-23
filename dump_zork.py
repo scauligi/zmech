@@ -466,7 +466,8 @@ def print_insn(z, insn, block_labels=None):
                     insn.args[i] = _obj(insn.args[i])
                 elif re.match(r'pz[A-Z]', rinfo[i]):
                     if p := _tr_imm(insn.args[i]):
-                        s = z.readZ(p * 2)
+                        p *= 2
+                        s = z.readZ(p)
                         insn.args[i] = f"({p:04x})"
                         s = s.replace('"', '\"')
                         notes += f'  ; "{s}"'
@@ -573,12 +574,10 @@ def main(fname):
         z.seek(r.insns[-1].end)
         if z.tell() % 2 == 1:
             z.skip(1)
-    try:
+    with suppress(EOFError):
         while True:
             a = z.tell()
             routines[a] = z.readZ()
-    except EOFError:
-        pass
 
     # check that we have routines for all expected sites
     for dst, notes in notes_to_add.items():
@@ -884,19 +883,12 @@ def main(fname):
         print()
 
 
-def splat(z, oidx):
-    o = z.obj(oidx)
-    for p in o.props():
-        if p.len == 1:
-            ooidx = int.from_bytes(p.data)
-            if 1 <= ooidx <= 255:
-                oo = z.obj(ooidx)
-                print(hex(p.num), f"{ooidx:02x}", oo.shortname)
-
-
 if __name__ == '__main__':
     fname = 'zork1-r88-s840726.z3'
     import sys
+    from contextlib import redirect_stdout
+    from io import StringIO
+    from pathlib import Path
 
     if sys.flags.interactive:
         z = ZMech(fname)
@@ -913,4 +905,6 @@ if __name__ == '__main__':
                 print(str(p))
 
     else:
-        main(fname)
+        with redirect_stdout(StringIO()) as ss:
+            main(fname)
+        Path('z.asm').write_text(ss.getvalue())
